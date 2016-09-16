@@ -1,4 +1,4 @@
-# Specify the provider and access details
+# Access Details
 provider "aws" {
   access_key = "${var.access_key}"
   secret_key = "${var.secret_key}"
@@ -9,11 +9,17 @@ provider "aws" {
 # VPC
 resource "aws_vpc" "default" {
   cidr_block = "10.0.0.0/16"
+  tags {
+        Name = "${var.vpc_name}"
+    }
 }
 
 # Internet Gateway
 resource "aws_internet_gateway" "default" {
   vpc_id = "${aws_vpc.default.id}"
+    tags {
+        Name = "${var.igw_name}"
+    }
 }
 
 # VPC internet access
@@ -26,14 +32,17 @@ resource "aws_route" "internet_access" {
 # Subnet
 resource "aws_subnet" "default" {
   vpc_id                  = "${aws_vpc.default.id}"
-  cidr_block              = "10.0.1.0/24"
+  cidr_block              = "10.0.0.0/24"
   map_public_ip_on_launch = true
+    tags {
+        Name = "${var.subnet_name}"
+    }
 }
 
 # Security Group ELB
 resource "aws_security_group" "elb" {
-  name        = "terraform_example_elb"
-  description = "Used in the terraform"
+  name        = "${var.elb_sg_name}"
+  description = "${var.elb_sg_desc}"
   vpc_id      = "${aws_vpc.default.id}"
 
   # HTTP access from anywhere
@@ -55,8 +64,8 @@ resource "aws_security_group" "elb" {
 
 # Security group instance
 resource "aws_security_group" "default" {
-  name        = "terraform_example"
-  description = "Used in the terraform"
+  name        = "${var.instance_sg_name}"
+  description = "${var.instance_sg_desc}"
   vpc_id      = "${aws_vpc.default.id}"
 
   # SSH access from anywhere
@@ -72,7 +81,7 @@ resource "aws_security_group" "default" {
     from_port   = 80
     to_port     = 80
     protocol    = "tcp"
-    cidr_blocks = ["10.0.0.0/16"]
+    security_groups = ["${aws_security_group.elb.id}"]
   }
 
   # outbound internet access
@@ -84,9 +93,8 @@ resource "aws_security_group" "default" {
   }
 }
 
-
 resource "aws_elb" "web" {
-  name = "terraform-example-elb"
+  name = "${var.elb_name}"
 
   subnets         = ["${aws_subnet.default.id}"]
   security_groups = ["${aws_security_group.elb.id}"]
@@ -101,6 +109,7 @@ resource "aws_elb" "web" {
 
 }
 
+
 #SSH KEY
 resource "aws_key_pair" "auth" {
   key_name   = "${var.key_name}"
@@ -108,34 +117,35 @@ resource "aws_key_pair" "auth" {
 }
 
 resource "aws_instance" "web" {
-  count = "3"
-  connection {
-    user = "ubuntu"
-    type = "ssh"
-    private_key = "${file(var.private_key_path)}"
-  }
+    key_name = "${aws_key_pair.auth.id}"
+    count = "${var.ec2_count}"
+    instance_type = "${var.ec2_type}"
+    ami = "${lookup(var.aws_amis, var.aws_region)}"
+    vpc_security_group_ids = ["${aws_security_group.default.id}"]
+    subnet_id = "${aws_subnet.default.id}"
+    connection {
+      user = "ubuntu"
+      type = "ssh"
+      private_key = "${file(var.private_key_path)}"
+    }
+      tags {
+        Name = "${var.ec2_name}-${count.index}"
+    }
 
-  instance_type = "t2.micro"
 
-  ami = "${lookup(var.aws_amis, var.aws_region)}"
-  key_name = "${aws_key_pair.auth.id}"
-
-  # Our Security group to allow HTTP and SSH access
-  vpc_security_group_ids = ["${aws_security_group.default.id}"]
-
-  # We're going to launch into the same subnet as our ELB. In a production
-  # environment it's more common to have a separate private subnet for
-  # backend instances.
-  subnet_id = "${aws_subnet.default.id}"
-
-  # We run a remote provisioner on the instance after creating it.
-  # In this case, we just install nginx and start it. By default,
-  # this should be on port 80
   provisioner "remote-exec" {
     inline = [
       "sudo apt-get -y update",
-      "sudo apt-get -y install nginx",
-      "sudo service nginx start"
+      "sudo apt-get -y install apt-transport-https ca-certificates",
+      "sudo apt-key adv --keyserver hkp://p80.pool.sks-keyservers.net:80 --recv-keys 58118E89F3A912897C070ADBF76221572C52609D",
+      "echo deb https://apt.dockerproject.org/repo ubuntu-trusty main | sudo tee -a /etc/apt/sources.list.d/docker.list",
+      "sudo apt-get update",
+      "sudo apt-get install -y docker-engine",
+      "sudo docker run --name wordpress --restart=always -d -p 80:80 -e WORDPRESS_DB_NAME=${var.db_name} -e WORDPRESS_DB_HOST=${var.db_host}:${var.db_port} -e WORDPRESS_DB_USER=${var.db_username} -e WORDPRESS_DB_PASSWORD=${var.db_password} wordpress"
     ]
   }
+}
+
+output "url" {
+  value = "${aws_elb.web.dns_name}"
 }
